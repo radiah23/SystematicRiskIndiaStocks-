@@ -1,0 +1,42 @@
+[
+  {
+    "ticker": "WIPRO.NS",
+    "pagerank": 0.054910730229003606
+  },
+  {
+    "ticker": "TCS.NS",
+    "pagerank": 0.03754462516762501
+  },
+  {
+    "ticker": "SBIN.NS",
+    "pagerank": 0.034821253275000005
+  },
+  {
+    "ticker": "KOTAKBANK.NS",
+    "pagerank": 0.034412352646875005
+  },
+  {
+    "ticker": "INFY.NS",
+    "pagerank": 0.023796225000000004
+  },
+  {
+    "ticker": "ICICIBANK.NS",
+    "pagerank": 0.023153625000000004
+  },
+  {
+    "ticker": "NESTLEIND.NS",
+    "pagerank": 0.022570950000000006
+  },
+  {
+    "ticker": "HDFCBANK.NS",
+    "pagerank": 0.015000000000000003
+  },
+  {
+    "ticker": "HINDUNILVR.NS",
+    "pagerank": 0.015000000000000003
+  },
+  {
+    "ticker": "HCLTECH.NS",
+    "pagerank": 0.015000000000000003
+  }
+]

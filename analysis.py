@@ -1,51 +1,157 @@
+"""Econometric tests and a written summary (results/summary.md).
+
+Question 1 (description, 2020-2024): do the network-centrality measures line up with the
+standard systemic-risk measures (beta, MES, Delta-CoVaR)?
+
+Question 2 (out-of-sample, the main test): using only 2018-2019 data, which measure best
+predicts how much each stock lost in the COVID crash? And does network centrality add
+anything once you already know a stock's beta?
+
+With 19 stocks, everything uses rank (Spearman) correlations and heteroskedasticity-robust
+(HC3) OLS, and the results should be read as suggestive, not conclusive.
+"""
 import json
-import yfinance as yf
-import pandas as pd
+
 import numpy as np
-
-
-with open("pagerank_results.json", "r") as f:
-    pagerank_data = json.load(f)
-
-pr_df = pd.DataFrame(pagerank_data)
-print(pr_df)
-# download nifty 50 as market benchmark
-tickers = pr_df["ticker"].tolist()
-tickers.append("^NSEI")  # nifty 50
-
-raw = yf.download(tickers, start="2020-01-01", end="2024-12-31")
-closes = raw["Close"]
-returns = closes.pct_change().dropna()
-
-# compute beta for each stock vs nifty
-nifty_returns = returns["^NSEI"]
-betas = {}
-
-for ticker in pr_df["ticker"]:
-    stock_returns = returns[ticker]
-    covariance = np.cov(stock_returns, nifty_returns)[0][1]
-    market_variance = np.var(nifty_returns)
-    beta = covariance / market_variance
-    betas[ticker] = round(beta, 4)
-
-beta_df = pd.DataFrame(list(betas.items()), columns=["ticker", "beta"])
-
-# merge pagerank and beta
-merged = pr_df.merge(beta_df, on="ticker")
-print(merged.sort_values("pagerank", ascending=False))
-
-#The higher the pagrank score the higher the beta should be higher so we want to test that
-#To test that we are going to perform regression
-
+import pandas as pd
+import statsmodels.api as sm
 from scipy import stats
 
-x = merged["pagerank"]
-y = merged["beta"]
+import config
 
-slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+R = config.RESULTS_DIR
+CENTRALITY = {
+    "pr_corr": "PageRank, correlation network",
+    "pr_resid": "PageRank, market-adjusted network",
+    "pr_spill": "PageRank, spillover network",
+    "to_others": "Spillover TO others",
+    "net": "Net spillover (TO - FROM)",
+}
+RISK = {"beta": "CAPM beta", "mes": "MES (5%)", "delta_covar": "Delta-CoVaR (5%)"}
 
-print(f"Slope: {round(slope, 4)}")
-print(f"R-squared: {round(r_value**2, 4)}")
-print(f"P-value: {round(p_value, 4)}")
 
-# Not significant. 
+def load_panel(window: str) -> pd.DataFrame:
+    df = pd.read_csv(R / f"risk_{window}.csv", index_col="ticker")
+    for net in ("corr", "resid", "spill"):
+        pr = pd.read_json(R / f"pagerank_{net}_{window}.json").set_index("ticker")
+        df[f"pr_{net}"] = pr["pagerank"]
+    return df
+
+
+def spearman_table(df, xs: dict, ys: dict) -> pd.DataFrame:
+    rows = []
+    for x, xl in xs.items():
+        for y, yl in ys.items():
+            rho, p = stats.spearmanr(df[x], df[y])
+            rows.append({"measure": xl, "against": yl, "spearman_rho": rho, "p_value": p})
+    return pd.DataFrame(rows)
+
+
+def ols_hc3(y, X: pd.DataFrame):
+    return sm.OLS(y, sm.add_constant(X)).fit(cov_type="HC3")
+
+
+def md_table(df: pd.DataFrame, floatfmt="{:.3f}") -> str:
+    cols = list(df.columns)
+    lines = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
+    for _, row in df.iterrows():
+        cells = [floatfmt.format(v) if isinstance(v, (float, np.floating)) else str(v) for v in row]
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def main():
+    meta = json.loads((R / "meta.json").read_text())
+    main_df, pre_df = load_panel("main"), load_panel("pre")
+    crash = pd.read_csv(R / "crash_returns.csv", index_col="ticker")["crash_return"]
+    pre_df["crash_return"] = crash
+    main_df.to_csv(R / "panel_main.csv")
+    pre_df.to_csv(R / "panel_pre.csv")
+
+    # Q1: centrality vs standard risk measures, 2020-2024
+    q1 = spearman_table(main_df, CENTRALITY, RISK)
+    q1.to_csv(R / "q1_centrality_vs_risk.csv", index=False)
+    orig = ols_hc3(main_df["beta"], main_df[["pr_corr"]])
+
+    # Q2: pre-crisis measures vs COVID crash return
+    predictors = {**RISK, **CENTRALITY, "ann_vol": "Volatility"}
+    q2 = spearman_table(pre_df, predictors, {"crash_return": "COVID crash return"})
+    q2 = q2.drop(columns="against").sort_values("spearman_rho")
+    q2.to_csv(R / "q2_precrisis_vs_crash.csv", index=False)
+
+    base = ols_hc3(pre_df["crash_return"], pre_df[["beta"]])
+    incr = []
+    for c, label in CENTRALITY.items():
+        X = pre_df[["beta", c]].copy()
+        X[c] = (X[c] - X[c].mean()) / X[c].std()       # coefficient = effect of 1 s.d.
+        fit = ols_hc3(pre_df["crash_return"], X)
+        incr.append({"added to beta": label, "coef_per_sd": fit.params[c],
+                     "t_hc3": fit.tvalues[c], "p_value": fit.pvalues[c],
+                     "R2_gain": fit.rsquared - base.rsquared})
+    incr = pd.DataFrame(incr)
+    incr.to_csv(R / "q2_incremental_over_beta.csv", index=False)
+
+    # Outside benchmark: where does each measure rank the RBI's three D-SIBs? (1 = riskiest)
+    riskier_when_low = {"mes", "delta_covar"}
+    dsib_rows = []
+    for col, label in {**RISK, **CENTRALITY}.items():
+        ranks = main_df[col].rank(ascending=col in riskier_when_low, method="min").astype(int)
+        dsib_rows.append({"measure": label,
+                          **{t.replace(".NS", ""): ranks[t] for t in config.DSIBS},
+                          "mean_rank": ranks[config.DSIBS].mean()})
+    dsib = pd.DataFrame(dsib_rows).sort_values("mean_rank")
+    dsib.to_csv(R / "dsib_ranks.csv", index=False)
+
+    top = main_df.sort_values("net", ascending=False)
+    rank_tbl = top[["sector", "beta", "mes", "delta_covar", "to_others", "from_others", "net",
+                    "pr_corr", "pr_spill"]].reset_index()
+
+    m, p, c = meta["main"], meta["pre"], meta["crash"]
+    text = f"""# Results summary
+
+_Auto-generated by `analysis.py`. Re-run `python run_pipeline.py` to refresh._
+
+## Network structure
+| | 2018-2019 (pre-crisis) | 2020-2024 (main) |
+|---|---|---|
+| Trading days | {p['n_days']} | {m['n_days']} |
+| Mean pairwise correlation | {p['mean_pairwise_corr']:.3f} | {m['mean_pairwise_corr']:.3f} |
+| Edges, raw network (rho > {config.CORR_THRESHOLD}) | {p['n_edges_corr']} | {m['n_edges_corr']} |
+| Edges, market-adjusted network (rho > {config.RESID_THRESHOLD}) | {p['n_edges_resid']} | {m['n_edges_resid']} |
+| Within-sector share, raw network | {p['within_sector_share_corr']:.0%} | {m['within_sector_share_corr']:.0%} |
+| Within-sector share, market-adjusted | {p['within_sector_share_resid']:.0%} | {m['within_sector_share_resid']:.0%} |
+| Total connectedness index (Diebold-Yilmaz) | {p['tci']:.1f} | {m['tci']:.1f} |
+
+COVID crash window (NIFTY 50 peak to trough): {c['peak']} to {c['trough']}, market return {c['market_return']:.1%}.
+
+## Stocks ranked by net spillover, 2020-2024
+Net > 0 means the stock transmits more shocks than it receives.
+
+{md_table(rank_tbl)}
+
+## Benchmark: where each measure ranks the RBI's D-SIBs (2020-2024, rank out of 19, 1 = most systemic)
+A measure that captures systemic importance should put these three banks near the top; a random ranking averages 10.
+
+{md_table(dsib, floatfmt="{:.1f}")}
+
+## Q1. Does centrality line up with standard systemic-risk measures? (2020-2024, Spearman, n = 19)
+{md_table(q1)}
+
+Original project's regression, beta on correlation-network PageRank (HC3): slope = {orig.params['pr_corr']:.3f}, t = {orig.tvalues['pr_corr']:.2f}, p = {orig.pvalues['pr_corr']:.3f}, R2 = {orig.rsquared:.3f}.
+
+## Q2. Which pre-crisis (2018-2019) measure predicted COVID crash losses? (Spearman, n = 19)
+A negative rho means stocks scoring higher on the measure lost more in the crash.
+
+{md_table(q2)}
+
+### Does centrality add information beyond beta? (OLS, HC3; crash return on pre-crisis beta + one centrality measure, standardized)
+Beta-only model: R2 = {base.rsquared:.3f}.
+
+{md_table(incr)}
+"""
+    (R / "summary.md").write_text(text)
+    print(text)
+
+
+if __name__ == "__main__":
+    main()

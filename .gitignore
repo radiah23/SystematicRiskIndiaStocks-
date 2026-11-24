@@ -6,3 +6,5 @@ build/
 *.egg-info/
 .Rproj.user/
 .Rhistory
+java/build/
+.pytest_cache/
